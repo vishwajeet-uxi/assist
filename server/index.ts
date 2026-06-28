@@ -5,7 +5,7 @@ import mongoose from "mongoose";
 import { Server as SocketIOServer } from "socket.io";
 import http from "http";
 import { handleDemo } from "./routes/demo";
-import { createMeeting, getMeeting, endMeeting, getTranscript } from "./routes/transcript";
+import { createMeeting, getMeeting, endMeeting, getTranscript, addTranscriptChunk } from "./routes/transcript";
 import { generateSummary, answerQuestion, extractKeyPoints } from "./routes/ai";
 
 declare global {
@@ -58,31 +58,73 @@ export function createServer() {
   app.get("/api/meetings/:meetingId", getMeeting);
   app.post("/api/meetings/:meetingId/end", endMeeting);
   app.get("/api/meetings/:meetingId/transcript", getTranscript);
+  app.post("/api/meetings/:meetingId/transcript-chunk", addTranscriptChunk);
 
   // AI routes
   app.post("/api/ai/summary", generateSummary);
   app.post("/api/ai/question", answerQuestion);
   app.post("/api/ai/key-points", extractKeyPoints);
 
-  // Socket.IO events
+  // Socket.IO events for real-time collaboration
   io.on("connection", (socket) => {
     console.log("New client connected:", socket.id);
 
     socket.on("join-meeting", (meetingId: string) => {
       socket.join(`meeting-${meetingId}`);
+      console.log(`Socket ${socket.id} joined meeting ${meetingId}`);
       io.to(`meeting-${meetingId}`).emit("user-joined", {
         userId: socket.id,
         timestamp: new Date(),
       });
     });
 
-    socket.on("transcript-chunk", async (data: { meetingId: string; text: string; duration: number }) => {
-      // Broadcast to all clients in this meeting room
-      io.to(`meeting-${data.meetingId}`).emit("transcript-update", {
-        text: data.text,
-        timestamp: new Date(),
-        duration: data.duration,
-      });
+    socket.on("transcript-chunk", async (data: { meetingId: string; text: string; duration?: number }) => {
+      try {
+        // Persist to database
+        const meeting = await mongoose.model("Meeting").findByIdAndUpdate(
+          data.meetingId,
+          {
+            $push: {
+              transcriptChunks: {
+                text: data.text,
+                timestamp: new Date(),
+                duration: data.duration || 0,
+              },
+            },
+            updatedAt: new Date(),
+          }
+        );
+
+        if (meeting) {
+          // Update full transcript
+          const currentTranscript = (meeting as any).fullTranscript || "";
+          const updatedTranscript = currentTranscript + " " + data.text;
+          await mongoose.model("Meeting").updateOne(
+            { _id: data.meetingId },
+            { fullTranscript: updatedTranscript }
+          );
+        }
+
+        // Broadcast to all clients in this meeting room
+        io.to(`meeting-${data.meetingId}`).emit("transcript-update", {
+          text: data.text,
+          timestamp: new Date(),
+          duration: data.duration || 0,
+        });
+      } catch (error) {
+        console.error("Error processing transcript chunk:", error);
+        socket.emit("error", { message: "Failed to process transcript chunk" });
+      }
+    });
+
+    socket.on("ask-question", async (data: { meetingId: string; question: string; transcript: string }) => {
+      try {
+        // This can be handled by making an HTTP request to the AI endpoint from the client
+        socket.emit("question-received", { id: socket.id, timestamp: new Date() });
+      } catch (error) {
+        console.error("Error handling question:", error);
+        socket.emit("error", { message: "Failed to process question" });
+      }
     });
 
     socket.on("disconnect", () => {

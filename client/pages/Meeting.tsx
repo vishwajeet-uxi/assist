@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { AlertCircle, Search, Download, Pause, Play, StopCircle, Loader } from "lucide-react";
+import { Card } from "@/components/ui/card";
+import { AlertCircle, Search, Download, Pause, Play, StopCircle, Loader, Copy, Share2 } from "lucide-react";
+import { toast } from "sonner";
 
 interface TranscriptChunk {
   text: string;
@@ -11,21 +13,25 @@ interface TranscriptChunk {
 }
 
 export function Meeting() {
-  const [meetingId] = useState("default-meeting");
+  const [meetingId, setMeetingId] = useState<string | null>(null);
+  const [meetingTitle, setMeetingTitle] = useState("New Meeting");
   const [isConnected, setIsConnected] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptChunk[]>([]);
   const [fullTranscript, setFullTranscript] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
-  const [summary, setSummary] = useState<{ summary: string; keyPoints: string[]; actionItems: string[] } | null>(null);
+  const [summary, setSummary] = useState<any | null>(null);
   const [loadingSummary, setLoadingSummary] = useState(false);
   const [showQA, setShowQA] = useState(false);
   const [question, setQuestion] = useState("");
   const [qaResponse, setQaResponse] = useState<string | null>(null);
   const [loadingQA, setLoadingQA] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [elapsedTime, setElapsedTime] = useState(0);
   const socketRef = useRef<Socket | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     // Initialize Socket.IO connection
@@ -41,7 +47,9 @@ export function Meeting() {
     socket.on("connect", () => {
       console.log("Connected to server");
       setIsConnected(true);
-      socket.emit("join-meeting", meetingId);
+      if (meetingId) {
+        socket.emit("join-meeting", meetingId);
+      }
     });
 
     socket.on("disconnect", () => {
@@ -51,10 +59,16 @@ export function Meeting() {
 
     socket.on("transcript-update", (data: TranscriptChunk) => {
       setTranscript((prev) => [...prev, data]);
-      setFullTranscript((prev) => prev + " " + data.text);
+      setFullTranscript((prev) => (prev ? prev + " " + data.text : data.text));
+    });
+
+    socket.on("error", (error: any) => {
+      console.error("Socket error:", error);
+      toast.error("Connection error: " + error.message);
     });
 
     return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
       socket.disconnect();
     };
   }, [meetingId]);
@@ -79,34 +93,99 @@ export function Meeting() {
     "Next, let's review the engineering roadmap.",
   ];
 
-  const handleStartMeeting = () => {
-    setIsRecording(true);
-    setTranscript([]);
-    setFullTranscript("");
+  const handleStartMeeting = async () => {
+    try {
+      const title = meetingTitle || `Meeting ${new Date().toLocaleString()}`;
+      const response = await fetch("/api/meetings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          userId: "user-" + Math.random().toString(36).substr(2, 9),
+        }),
+      });
 
-    // Simulate receiving transcript chunks
-    mockTranscripts.forEach((text, idx) => {
-      setTimeout(() => {
-        const newChunk: TranscriptChunk = {
-          text,
-          timestamp: new Date(),
-          duration: Math.random() * 3 + 2,
-        };
-        setTranscript((prev) => [...prev, newChunk]);
-        setFullTranscript((prev) => prev + " " + text);
-      }, idx * 1500);
-    });
+      const meeting = await response.json();
+      setMeetingId(meeting._id);
+
+      // Join meeting via socket
+      if (socketRef.current) {
+        socketRef.current.emit("join-meeting", meeting._id);
+      }
+
+      setIsRecording(true);
+      setTranscript([]);
+      setFullTranscript("");
+      setElapsedTime(0);
+      setIsPaused(false);
+      setSummary(null);
+
+      // Start timer
+      timerRef.current = setInterval(() => {
+        setElapsedTime((prev) => prev + 1);
+      }, 1000);
+
+      toast.success("Meeting started");
+
+      // Simulate receiving transcript chunks for demo
+      mockTranscripts.forEach((text, idx) => {
+        setTimeout(() => {
+          const newChunk: TranscriptChunk = {
+            text,
+            timestamp: new Date(),
+            duration: Math.random() * 3 + 2,
+          };
+          if (socketRef.current) {
+            socketRef.current.emit("transcript-chunk", {
+              meetingId: meeting._id,
+              text,
+              duration: newChunk.duration,
+            });
+          }
+        }, idx * 1500);
+      });
+    } catch (error) {
+      console.error("Failed to start meeting:", error);
+      toast.error("Failed to start meeting");
+    }
   };
 
-  const handleStopMeeting = () => {
-    setIsRecording(false);
+  const handleStopMeeting = async () => {
+    try {
+      if (meetingId && timerRef.current) {
+        clearInterval(timerRef.current);
+        await fetch(`/api/meetings/${meetingId}/end`, { method: "POST" });
+        setIsRecording(false);
+        toast.success("Meeting ended");
+      }
+    } catch (error) {
+      console.error("Failed to end meeting:", error);
+      toast.error("Failed to end meeting");
+    }
   };
 
   const handleTogglePause = () => {
-    // TODO: Implement pause functionality
+    setIsPaused(!isPaused);
+    if (isPaused && timerRef.current === null) {
+      timerRef.current = setInterval(() => {
+        setElapsedTime((prev) => prev + 1);
+      }, 1000);
+    } else if (!isPaused && timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  const copyToClipboard = () => {
+    navigator.clipboard.writeText(fullTranscript);
+    toast.success("Transcript copied to clipboard");
   };
 
   const handleGenerateSummary = async () => {
+    if (!fullTranscript.trim()) {
+      toast.error("No transcript to summarize");
+      return;
+    }
     setLoadingSummary(true);
     try {
       const response = await fetch("/api/ai/summary", {
@@ -116,15 +195,24 @@ export function Meeting() {
       });
       const data = await response.json();
       setSummary(data);
+      toast.success("Summary generated");
     } catch (error) {
       console.error("Failed to generate summary:", error);
+      toast.error("Failed to generate summary");
     } finally {
       setLoadingSummary(false);
     }
   };
 
   const handleAskQuestion = async () => {
-    if (!question.trim()) return;
+    if (!question.trim()) {
+      toast.error("Please enter a question");
+      return;
+    }
+    if (!fullTranscript.trim()) {
+      toast.error("No transcript available");
+      return;
+    }
     setLoadingQA(true);
     try {
       const response = await fetch("/api/ai/question", {
@@ -134,11 +222,22 @@ export function Meeting() {
       });
       const data = await response.json();
       setQaResponse(data.answer);
+      setQuestion("");
     } catch (error) {
       console.error("Failed to answer question:", error);
+      toast.error("Failed to answer question");
     } finally {
       setLoadingQA(false);
     }
+  };
+
+  const formatDuration = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
   };
 
   const filteredTranscript = searchTerm
@@ -152,23 +251,35 @@ export function Meeting() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800">
-      <div className="max-w-6xl mx-auto p-6">
+      <div className="max-w-7xl mx-auto p-4 md:p-6">
         {/* Header */}
         <div className="bg-slate-800 rounded-lg shadow-lg p-6 mb-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-4">
+            <div className="flex-1 min-w-0">
               <h1 className="text-3xl font-bold text-white">AI Meeting Assistant</h1>
-              <p className="text-slate-400 text-sm mt-1">Live transcription and meeting notes</p>
+              <p className="text-slate-400 text-sm mt-1">Real-time transcription & AI-powered insights</p>
             </div>
             <div className="flex items-center gap-3">
               <div
-                className={`w-3 h-3 rounded-full ${isConnected ? "bg-green-500" : "bg-red-500"}`}
+                className={`w-3 h-3 rounded-full ${isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"}`}
               />
               <span className="text-sm font-medium text-slate-300">
                 {isConnected ? "Connected" : "Disconnected"}
               </span>
             </div>
           </div>
+
+          {/* Meeting Title Input */}
+          {!isRecording ? (
+            <div className="mb-4">
+              <Input
+                placeholder="Meeting title (optional)"
+                value={meetingTitle}
+                onChange={(e) => setMeetingTitle(e.target.value)}
+                className="bg-slate-700 border-slate-600 text-white placeholder-slate-500 max-w-md"
+              />
+            </div>
+          ) : null}
 
           {/* Controls */}
           <div className="flex gap-3 flex-wrap">
@@ -184,10 +295,19 @@ export function Meeting() {
               <>
                 <Button
                   onClick={handleTogglePause}
-                  className="bg-yellow-600 hover:bg-yellow-700"
+                  className={isPaused ? "bg-green-600 hover:bg-green-700" : "bg-yellow-600 hover:bg-yellow-700"}
                 >
-                  <Pause className="w-4 h-4 mr-2" />
-                  Pause
+                  {isPaused ? (
+                    <>
+                      <Play className="w-4 h-4 mr-2" />
+                      Resume
+                    </>
+                  ) : (
+                    <>
+                      <Pause className="w-4 h-4 mr-2" />
+                      Pause
+                    </>
+                  )}
                 </Button>
                 <Button
                   onClick={handleStopMeeting}
@@ -264,28 +384,41 @@ export function Meeting() {
 
               {/* Footer Stats */}
               <div className="border-t border-slate-700 bg-slate-800 px-4 py-3 text-xs text-slate-400">
-                <div className="flex justify-between">
-                  <span>{transcript.length} chunks • {fullTranscript.length} characters</span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-xs"
-                  >
-                    <Download className="w-3 h-3 mr-1" />
-                    Export
-                  </Button>
+                <div className="flex justify-between items-center flex-wrap gap-2">
+                  <span>
+                    {transcript.length} chunks • {fullTranscript.length} chars • {formatDuration(elapsedTime)}
+                  </span>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={copyToClipboard}
+                      className="text-xs"
+                    >
+                      <Copy className="w-3 h-3 mr-1" />
+                      Copy
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-xs"
+                    >
+                      <Download className="w-3 h-3 mr-1" />
+                      Export
+                    </Button>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
 
           {/* Sidebar - AI Features Panel */}
-          <div className="bg-slate-800 rounded-lg shadow-lg p-6 h-fit max-h-[600px] overflow-y-auto">
+          <div className="bg-slate-800 rounded-lg shadow-lg p-6 h-fit max-h-[800px] overflow-y-auto">
             <h2 className="text-lg font-bold text-white mb-4">AI Features</h2>
             <div className="space-y-3">
               <Button
                 onClick={handleGenerateSummary}
-                disabled={!isRecording || transcript.length === 0 || loadingSummary}
+                disabled={!fullTranscript || loadingSummary}
                 className="w-full bg-blue-600 hover:bg-blue-700"
               >
                 {loadingSummary ? (
@@ -297,15 +430,15 @@ export function Meeting() {
                   <>📝 Generate Summary</>
                 )}
               </Button>
-              <Button className="w-full bg-purple-600 hover:bg-purple-700" disabled={!isRecording}>
-                ✓ Action Items
-              </Button>
               <Button
                 onClick={() => setShowQA(!showQA)}
                 className="w-full bg-indigo-600 hover:bg-indigo-700"
-                disabled={transcript.length === 0}
+                disabled={!fullTranscript}
               >
                 💬 Ask Question
+              </Button>
+              <Button className="w-full bg-purple-600 hover:bg-purple-700" disabled={!fullTranscript}>
+                📎 Export as PDF
               </Button>
             </div>
 

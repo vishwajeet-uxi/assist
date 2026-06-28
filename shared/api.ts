@@ -10,3 +10,28 @@
 export interface DemoResponse {
   message: string;
 }
+
+export interface TranscriptChunk {
+  text: string;
+  timestamp: string;
+  duration: number;
+}
+
+export interface Meeting {
+  _id: string;
+  title: string;
+  userId: string;
+  startTime: string;
+  endTime?: string;
+  status: "active" | "completed" | "paused";
+  transcriptChunks: TranscriptChunk[];
+  fullTranscript: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TranscriptResponse {
+  meetingId: string;
+  fullTranscript: string;
+  chunks: TranscriptChunk[];
+}

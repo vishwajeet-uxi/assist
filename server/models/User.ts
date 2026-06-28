@@ -21,7 +21,7 @@ userSchema.pre<IUser>("save", async function (next) {
   const hashedPassword = await bcryptjs.hash(this.password, 10);
   this.password = hashedPassword;
   next();
-});
+} as any);
 
 userSchema.methods.comparePassword = async function (password: string) {
   return bcryptjs.compare(password, this.password);
